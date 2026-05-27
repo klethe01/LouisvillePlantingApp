@@ -8,7 +8,6 @@ Target Audience: Louisville, KY Gardeners
 
 Technology Stack: Dash, Plotly, Python, Open Meteo-API 
 
-PW: LVLplant2026! 
 
  
 
