@@ -1,0 +1,4 @@
+openmeteo-requests
+supabase
+dash
+plotly
