@@ -3,7 +3,8 @@
 # Initial PostgreSQL Load Script — Python version
 # Requires: psycopg2-binary, python-dotenv
 # Install:  pip install psycopg2-binary python-dotenv
-# Script generated and refined using Claude 4.6 Sonnet (Anthropic, 2026)
+# Developed with and refined using Claude 4.6 Sonnet (Anthropic, 2026),
+# Google Colaboratory and Gemini 2.5 Flash (2026)
 # ============================================================
 
 import psycopg2
@@ -257,6 +258,8 @@ def verify(cur):
 
 def main():
     print("Connecting to database...")
+    conn = None # Initialize conn to None
+    cur = None  # Initialize cur to None
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         conn.autocommit = False
@@ -267,13 +270,27 @@ def main():
 
     try:
         print("\nDropping existing tables...")
+        # It's generally safe to drop tables without specific error handling here
+        # as a failure to drop would likely indicate they don't exist,
+        # and subsequent CREATE statements would still work.
         cur.execute(DROP_TABLES)
 
         print("\nCreating tables...")
-        run_ddl(cur, CREATE_CATEGORY, "category")
-        run_ddl(cur, CREATE_PLANTS,   "plants")
-        run_ddl(cur, CREATE_TEMPS,    "temps")
-        run_ddl(cur, CREATE_RISK,     "risk")
+        # Adding more specific error handling for each DDL statement
+        ddl_statements = [
+            (CREATE_CATEGORY, "category"),
+            (CREATE_PLANTS, "plants"),
+            (CREATE_TEMPS, "temps"),
+            (CREATE_RISK, "risk"),
+        ]
+        for sql_statement, label in ddl_statements:
+            try:
+                run_ddl(cur, sql_statement, label)
+            except psycopg2.Error as e:
+                print(f"ERROR: Failed to create table {label}: {e}")
+                if conn:
+                    conn.rollback()
+                sys.exit(1)
 
         print("\nSeeding category...")
         execute_values(
@@ -314,13 +331,17 @@ def main():
         verify(cur)
 
     except Exception as e:
-        conn.rollback()
+        # This catch-all remains for other potential errors during seeding or verification
+        if conn:
+            conn.rollback()
         print(f"\nError — transaction rolled back: {e}")
         sys.exit(1)
 
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
         print("\nDone.")
 
 
