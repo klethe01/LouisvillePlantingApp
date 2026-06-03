@@ -1,4 +1,3 @@
-#environment and credentials
 .env
 .env.*
 *.env
@@ -7,8 +6,3 @@ venv/
 env/
 .env/
 ENV/
-
-#logs
-*.log
-*.log.*
-lpa_etl.log
