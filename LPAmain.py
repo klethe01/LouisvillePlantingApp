@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Louisville Planting Guide App — ETL Pipeline
 ============================================================
@@ -24,11 +23,11 @@ Requirements:
     Python 3.9+
 
 Environment (.env file in same directory):
-    DB_HOST=db.your-project.supabase.co
+    DB_HOST=
     DB_PORT=5432
     DB_NAME=postgres
     DB_USER=postgres
-    DB_PASSWORD=your_password_here
+    DB_PASSWORD=
     DB_SSL=require
     LOG_FILE=LPAmain.log   (optional, defaults to LPAmain.log)
     LOG_LEVEL=INFO          (optional, defaults to INFO)
