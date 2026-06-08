@@ -1,8 +1,7 @@
 dash
+dash-bootstrap-components
 plotly
 pandas
 psycopg2-binary
-requests
 python-dotenv
-openmeteo-requests
-supabase
+requests
