@@ -2,13 +2,14 @@
 Louisville Planting Guide App — ETL Pipeline
 ============================================================
 Extracts hourly temperature data from the Open Meteo API,
-transforms it into planting risk assessments, and loads
-results into PostgreSQL for use by the Dash application.
+transforms it into seed germination risk assessments based
+on 6cm soil temperatures, and loads results into PostgreSQL
+for use by the Dash application.
 
 Six pipeline stages:
     1. Extract    — pull hourly temps from Open Meteo API
     2. Clean      — parse timestamps to UTC, handle nulls, normalize types
-    3. Transform  — run risk engine to score each plant per planting type
+    3. Transform  — run risk engine to score each plant for seed germination
     4. Validate   — data quality checks before DB load
     5. Load       — upsert temps table, refresh risk table
     6. Analytics  — prepare finalized DataFrames for Dash
@@ -83,7 +84,7 @@ API_URL = "https://api.open-meteo.com/v1/forecast"
 API_PARAMS = {
     "latitude":         38.2542,
     "longitude":        -85.7594,
-    "hourly":           "temperature_2m,soil_temperature_6cm,soil_temperature_18cm",
+    "hourly":           "temperature_2m,soil_temperature_6cm",
     "temperature_unit": "fahrenheit",
     "timezone":         "America/New_York",
     "past_days":        7,
@@ -192,11 +193,6 @@ def get_db_connection():
     On clean exit:    commits the transaction and closes the connection.
     On any exception: rolls back the transaction, logs a warning,
                       re-raises the exception, and closes the connection.
-
-    Usage:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute(...)
     """
     conn = None
     try:
@@ -230,9 +226,8 @@ def extract_temperatures() -> dict:
     Pull hourly temperature data from the Open Meteo API.
 
     Variables fetched:
-        temperature_2m          — air temp at 2m height (°F)
-        soil_temperature_6cm    — soil temp at 6cm depth (°F, for seeds)
-        soil_temperature_18cm   — soil temp at 18cm depth (°F, for transplants)
+        temperature_2m        — air temp at 2m height (°F)
+        soil_temperature_6cm  — soil temp at 6cm depth (°F, for seed germination)
 
     Returns the raw parsed JSON as a dict.
     Raises RuntimeError on timeout, HTTP error, or unexpected response format.
@@ -286,23 +281,18 @@ def extract_temperatures() -> dict:
         )
 
     hourly = raw["hourly"]
-    required_vars = {
-        "time",
-        "temperature_2m",
-        "soil_temperature_6cm",
-        "soil_temperature_18cm",
-    }
+    required_vars = {"time", "temperature_2m", "soil_temperature_6cm"}
     missing_vars = required_vars - set(hourly.keys())
     if missing_vars:
         raise RuntimeError(
             f"API response missing expected hourly variables: {missing_vars}"
         )
 
+    # Confirm all variable arrays are the same length
     lengths = {var: len(hourly[var]) for var in required_vars}
     if len(set(lengths.values())) != 1:
         raise RuntimeError(
-            "API response hourly variable lengths differ: "
-            f"{lengths}"
+            f"API response hourly variable lengths differ: {lengths}"
         )
 
     n_rows = len(raw["hourly"]["time"])
@@ -333,10 +323,8 @@ def clean_temperatures(raw: dict) -> pd.DataFrame:
         is_forecast     (bool)
         air_temp        (Int64, rounded °F)
         soil_6cm_temp   (Int64, rounded °F)
-        soil_18cm_temp  (Int64, rounded °F)
         air_temp_raw    (float, kept for Stage 3)
         soil_6cm_raw    (float, kept for Stage 3)
-        soil_18cm_raw   (float, kept for Stage 3)
     """
     log.info("STAGE 2 — Clean & Normalize...")
 
@@ -346,7 +334,6 @@ def clean_temperatures(raw: dict) -> pd.DataFrame:
         "timestamp_str": hourly["time"],
         "air_temp_raw":  hourly["temperature_2m"],
         "soil_6cm_raw":  hourly["soil_temperature_6cm"],
-        "soil_18cm_raw": hourly["soil_temperature_18cm"],
     })
 
     # Log any nulls present in raw data before processing
@@ -377,13 +364,12 @@ def clean_temperatures(raw: dict) -> pd.DataFrame:
     # is stored as NULL in PostgreSQL rather than crashing the insert.
     df["air_temp"]      = df["air_temp_raw"].round().astype("Int64")
     df["soil_6cm_temp"] = df["soil_6cm_raw"].round().astype("Int64")
-    df["soil_18cm_temp"]= df["soil_18cm_raw"].round().astype("Int64")
 
-    # Drop the raw timestamp string and keep only needed columns
+    # Keep raw float columns for Stage 3 threshold comparisons
     df = df[[
         "timestamp", "is_forecast",
-        "air_temp", "soil_6cm_temp", "soil_18cm_temp",
-        "air_temp_raw", "soil_6cm_raw", "soil_18cm_raw",   # retained for Stage 3
+        "air_temp", "soil_6cm_temp",
+        "air_temp_raw", "soil_6cm_raw",   # retained for Stage 3
     ]]
 
     log.info(
@@ -398,31 +384,26 @@ def clean_temperatures(raw: dict) -> pd.DataFrame:
 # ============================================================
 # STAGE 3: TRANSFORM — RISK ENGINE
 # ------------------------------------------------------------
-# Scores each plant in the DB for seed and transplant planting
-# using the single lowest hourly reading (raw float) across the
-# full 14-day window for each of the three temperature variables.
+# Scores each plant in the DB for seed germination using the
+# single lowest hourly reading (raw float) across the full
+# 14-day window for air temp and soil temp at 6cm.
 #
-# Risk logic (applied independently for seed and transplant):
-#   HIGH:   min_soil < plant.min_threshold
+# Risk logic:
+#   HIGH:   min_soil_6cm < plant.min_soil_temp_6cm
 #           OR min_air < plant.min_air_temp
-#   LOW:    min_soil >= plant.opt_threshold
+#   LOW:    min_soil_6cm >= plant.opt_soil_temp_6cm
 #           AND min_air >= plant.opt_air_temp
 #   MEDIUM: all other cases (above minimum but not at optimal)
-#
-# Plants with NULL 18cm thresholds (e.g. cosmos, senna) are
-# skipped for transplant assessment entirely.
 # ============================================================
 
 class RiskRow(TypedDict):
-    plant_id: int
-    planting_type: str
-    risk_level: str
-    risk_desc: str
-    min_14day_air: int
+    plant_id:          int
+    risk_level:        str
+    risk_desc:         str
+    min_14day_air:     int
     min_14day_soil6cm: int
-    min_14day_soil18cm: int
-    window_start: datetime
-    window_end: datetime
+    window_start:      datetime
+    window_end:        datetime
 
 
 def _score_risk(
@@ -432,12 +413,11 @@ def _score_risk(
     opt_soil_threshold:  float,
     min_air_threshold:   float,
     opt_air_threshold:   float,
-    planting_type:       str,
 ) -> tuple[str, str]:
     """
-    Core risk scoring logic for a single plant / planting type combination.
-    Compares the 14-day minimum soil and air temps against the plant's
-    minimum and optimal thresholds and returns (risk_level, risk_desc).
+    Core risk scoring logic for a single plant.
+    Compares the 14-day minimum soil (6cm) and air temps against
+    the plant's thresholds and returns (risk_level, risk_desc).
     """
     # HIGH RISK — at least one minimum threshold was breached
     if min_soil < min_soil_threshold:
@@ -445,7 +425,7 @@ def _score_risk(
             "high",
             (
                 f"Soil temperature ({min_soil:.1f}°F) dropped below the minimum "
-                f"required for {planting_type} ({min_soil_threshold:.1f}°F) "
+                f"required for seed germination ({min_soil_threshold:.1f}°F) "
                 f"within the 14-day window. Not recommended."
             ),
         )
@@ -498,13 +478,8 @@ def compute_risk(cur, temps_clean: pd.DataFrame) -> list[RiskRow]:
     Uses raw float values (not the rounded integers) for threshold
     comparisons to avoid rounding artifacts at boundary conditions.
 
-    Args:
-        cur:         open psycopg2 cursor
-        temps_clean: cleaned DataFrame from clean_temperatures()
-
-    Returns:
-        List of dicts, one per plant per planting type, ready for
-        insertion into the risk table.
+    Returns a list of RiskRow dicts ready for insertion into the
+    risk table — one row per plant.
     """
     log.info("STAGE 3 — Transform: running risk engine...")
 
@@ -513,9 +488,9 @@ def compute_risk(cur, temps_clean: pd.DataFrame) -> list[RiskRow]:
             "Cannot compute risk: temperature DataFrame is empty."
         )
 
-    # Compute global minimums across all 168+ hourly readings.
-    # pandas .min() skips NaN by default, so sparse nulls in the
-    # API response won't corrupt the minimum calculation.
+    # Compute global minimums across all hourly readings.
+    # pandas .min() skips NaN by default so sparse nulls won't
+    # corrupt the minimum calculation.
     def _min_or_fail(series: pd.Series, label: str) -> float:
         value = series.dropna().min()
         if pd.isna(value):
@@ -524,11 +499,10 @@ def compute_risk(cur, temps_clean: pd.DataFrame) -> list[RiskRow]:
             )
         return float(value)
 
-    min_air = _min_or_fail(temps_clean["air_temp_raw"], "air temperature")
-    min_soil_6cm = _min_or_fail(temps_clean["soil_6cm_raw"], "6cm soil temperature")
-    min_soil_18cm = _min_or_fail(temps_clean["soil_18cm_raw"], "18cm soil temperature")
+    min_air      = _min_or_fail(temps_clean["air_temp_raw"],  "air temperature")
+    min_soil_6cm = _min_or_fail(temps_clean["soil_6cm_raw"],  "6cm soil temperature")
     window_start = temps_clean["timestamp"].min()
-    window_end = temps_clean["timestamp"].max()
+    window_end   = temps_clean["timestamp"].max()
 
     log.debug(
         "  14-day window: %s → %s",
@@ -536,92 +510,56 @@ def compute_risk(cur, temps_clean: pd.DataFrame) -> list[RiskRow]:
         window_end.strftime("%Y-%m-%d %H:%M UTC"),
     )
     log.debug(
-        "  Global minimums — air: %.1f°F | soil 6cm: %.1f°F | soil 18cm: %.1f°F",
-        min_air, min_soil_6cm, min_soil_18cm,
+        "  Global minimums — air: %.1f°F | soil 6cm: %.1f°F",
+        min_air, min_soil_6cm,
     )
 
     # Fetch all plants and their temperature thresholds from the DB
     cur.execute("""
         SELECT
             plant_id, common_name,
-            min_soil_temp_6cm,  opt_soil_temp_6cm,
-            min_soil_temp_18cm, opt_soil_temp_18cm,
-            min_air_temp,       opt_air_temp
+            min_soil_temp_6cm, opt_soil_temp_6cm,
+            min_air_temp,      opt_air_temp
         FROM plants
         ORDER BY plant_id
     """)
     plants = cur.fetchall()
     log.debug("  Loaded %d plants from DB.", len(plants))
 
-    risk_rows       = []
-    skipped_count   = 0
+    risk_rows = []
 
     for (
         plant_id, common_name,
-        min_6cm,  opt_6cm,
-        min_18cm, opt_18cm,
+        min_6cm, opt_6cm,
         min_air_thresh, opt_air_thresh,
     ) in plants:
 
-        # -- Seed assessment (soil at 6cm) ------------------------
-        seed_level, seed_desc = _score_risk(
+        risk_level, risk_desc = _score_risk(
             min_soil           = min_soil_6cm,
             min_air            = min_air,
             min_soil_threshold = min_6cm,
             opt_soil_threshold = opt_6cm,
             min_air_threshold  = min_air_thresh,
             opt_air_threshold  = opt_air_thresh,
-            planting_type      = "seed",
         )
         risk_rows.append({
             "plant_id":          plant_id,
-            "planting_type":     "seed",
-            "risk_level":        seed_level,
-            "risk_desc":         seed_desc,
+            "risk_level":        risk_level,
+            "risk_desc":         risk_desc,
             "min_14day_air":     round(min_air),
             "min_14day_soil6cm": round(min_soil_6cm),
-            "min_14day_soil18cm":round(min_soil_18cm),
             "window_start":      window_start,
             "window_end":        window_end,
         })
 
-        # -- Transplant assessment (soil at 18cm) -----------------
-        # Skip plants that have no 18cm threshold data in the DB.
-        # These are flagged with NULL in opt_soil_temp_18cm (e.g. cosmos, senna).
-        if min_18cm is None or opt_18cm is None:
-            skipped_count += 1
-            continue
-
-        transplant_level, transplant_desc = _score_risk(
-            min_soil           = min_soil_18cm,
-            min_air            = min_air,
-            min_soil_threshold = min_18cm,
-            opt_soil_threshold = opt_18cm,
-            min_air_threshold  = min_air_thresh,
-            opt_air_threshold  = opt_air_thresh,
-            planting_type      = "transplant",
-        )
-        risk_rows.append({
-            "plant_id":          plant_id,
-            "planting_type":     "transplant",
-            "risk_level":        transplant_level,
-            "risk_desc":         transplant_desc,
-            "min_14day_air":     round(min_air),
-            "min_14day_soil6cm": round(min_soil_6cm),
-            "min_14day_soil18cm":round(min_soil_18cm),
-            "window_start":      window_start,
-            "window_end":        window_end,
-        })
-
-    # Summary breakdown replaces per-plant debug lines (up to 94 lines per run)
+    # Summary breakdown at DEBUG level
     log.debug(
         "  Risk breakdown: %s",
         dict(Counter(r["risk_level"] for r in risk_rows)),
     )
-
     log.info(
-        "  Risk engine complete: %d assessments | %d transplant skips (no 18cm data).",
-        len(risk_rows), skipped_count,
+        "  Risk engine complete: %d assessments generated.",
+        len(risk_rows),
     )
     return risk_rows
 
@@ -641,7 +579,10 @@ def validate_temps(temps_clean: pd.DataFrame) -> bool:
     Validate the cleaned temperature DataFrame.
 
     Critical checks (pipeline aborts on failure):
-        - Row count is at least 90% of the expected 336 rows
+        - DataFrame is not empty
+        - No null timestamps
+        - No duplicate timestamps
+        - Row count is at least 90% of expected 336 rows
 
     Warning checks (logged but do not abort):
         - Null values in temperature columns
@@ -659,6 +600,7 @@ def validate_temps(temps_clean: pd.DataFrame) -> bool:
         return False
 
     timestamps = temps_clean["timestamp"].sort_values()
+
     if timestamps.isnull().any():
         log.warning("  [FAIL] Null timestamps found in temperature data.")
         return False
@@ -666,38 +608,34 @@ def validate_temps(temps_clean: pd.DataFrame) -> bool:
     unique_count = timestamps.nunique()
     if unique_count != actual:
         log.warning(
-            "  [FAIL] Expected %d unique timestamps but found %d rows with duplicates.",
+            "  [FAIL] Duplicate timestamps found: %d rows but only %d unique timestamps.",
             actual, unique_count,
         )
         passed = False
 
-    expected = 14 * 24
-    window_hours = int((timestamps.iloc[-1] - timestamps.iloc[0]) / pd.Timedelta(hours=1)) + 1
+    expected    = 14 * 24   # 336 hourly rows
+    window_hours = int(
+        (timestamps.iloc[-1] - timestamps.iloc[0]) / pd.Timedelta(hours=1)
+    ) + 1
+
     if actual < expected * 0.9:
         log.warning(
-            "  [FAIL] Expected approximately %d rows, received %d. "
+            "  [FAIL] Expected ~%d rows, received %d. "
             "API may have returned incomplete data.",
             expected, actual,
         )
         passed = False
     elif actual < window_hours * 0.9:
         log.warning(
-            "  [FAIL] Temperature coverage appears incomplete: expected %d hourly timestamps "
-            "from %s to %s, received %d.",
-            window_hours,
-            timestamps.iloc[0].strftime("%Y-%m-%d %H:%M UTC"),
-            timestamps.iloc[-1].strftime("%Y-%m-%d %H:%M UTC"),
-            actual,
+            "  [FAIL] Coverage incomplete: expected %d hourly timestamps, received %d.",
+            window_hours, actual,
         )
         passed = False
     else:
-        log.debug(
-            "  [PASS] Row count: %d (expected ~%d, window covers %d hours).",
-            actual, expected, window_hours,
-        )
+        log.debug("  [PASS] Row count: %d (expected ~%d).", actual, expected)
 
     # Warning check: null values in temperature columns
-    for col in ["air_temp", "soil_6cm_temp", "soil_18cm_temp"]:
+    for col in ["air_temp", "soil_6cm_temp"]:
         n_null = int(temps_clean[col].isnull().sum())
         if n_null > 0:
             log.warning(
@@ -710,7 +648,6 @@ def validate_temps(temps_clean: pd.DataFrame) -> bool:
     bounds = [
         ("air_temp_raw",  AIR_TEMP_MIN_PLAUSIBLE,  AIR_TEMP_MAX_PLAUSIBLE,  "air temp"),
         ("soil_6cm_raw",  SOIL_TEMP_MIN_PLAUSIBLE, SOIL_TEMP_MAX_PLAUSIBLE, "soil 6cm"),
-        ("soil_18cm_raw", SOIL_TEMP_MIN_PLAUSIBLE, SOIL_TEMP_MAX_PLAUSIBLE, "soil 18cm"),
     ]
     for col, lo, hi, label in bounds:
         series = temps_clean[col].dropna()
@@ -723,11 +660,9 @@ def validate_temps(temps_clean: pd.DataFrame) -> bool:
             )
 
     # Warning check: both past and forecast data present
-    has_forecast = bool(temps_clean["is_forecast"].any())
-    has_actual   = bool((~temps_clean["is_forecast"]).any())
-    if not has_forecast:
+    if not temps_clean["is_forecast"].any():
         log.warning("  [WARN] No forecast rows found — all data is historical.")
-    if not has_actual:
+    if temps_clean["is_forecast"].all():
         log.warning("  [WARN] No actual rows found — all data is forecast.")
 
     if passed:
@@ -743,7 +678,6 @@ def validate_risk(risk_rows: list[RiskRow], cur=None) -> bool:
         - At least one row was generated
         - All required fields are present on every row
         - risk_level values are one of: low, medium, high
-        - planting_type values are one of: seed, transplant
         - All plant_ids exist in the plants table (referential integrity)
 
     Returns True if all critical checks pass, False otherwise.
@@ -755,13 +689,12 @@ def validate_risk(risk_rows: list[RiskRow], cur=None) -> bool:
         log.warning("  [FAIL] No risk rows generated. Risk table would be empty.")
         return False
 
-    required_fields  = {
-        "plant_id", "planting_type", "risk_level", "risk_desc",
-        "min_14day_air", "min_14day_soil6cm", "min_14day_soil18cm",
+    required_fields = {
+        "plant_id", "risk_level", "risk_desc",
+        "min_14day_air", "min_14day_soil6cm",
         "window_start", "window_end",
     }
-    valid_risk_levels    = {"low", "medium", "high"}
-    valid_planting_types = {"seed", "transplant"}
+    valid_risk_levels = {"low", "medium", "high"}
 
     for i, row in enumerate(risk_rows):
         missing = required_fields - set(row.keys())
@@ -773,13 +706,6 @@ def validate_risk(risk_rows: list[RiskRow], cur=None) -> bool:
             log.warning(
                 "  [FAIL] Row %d invalid risk_level: '%s'",
                 i, row.get("risk_level"),
-            )
-            passed = False
-
-        if row.get("planting_type") not in valid_planting_types:
-            log.warning(
-                "  [FAIL] Row %d invalid planting_type: '%s'",
-                i, row.get("planting_type"),
             )
             passed = False
 
@@ -809,17 +735,11 @@ def validate_risk(risk_rows: list[RiskRow], cur=None) -> bool:
 
     # Log risk level distribution as an informational summary
     level_counts = Counter(r["risk_level"] for r in risk_rows)
-    type_counts  = Counter(r["planting_type"] for r in risk_rows)
     log.info(
         "  Risk distribution — low: %d | medium: %d | high: %d",
         level_counts.get("low",    0),
         level_counts.get("medium", 0),
         level_counts.get("high",   0),
-    )
-    log.info(
-        "  Planting type breakdown — seed: %d | transplant: %d",
-        type_counts.get("seed",       0),
-        type_counts.get("transplant", 0),
     )
 
     if passed:
@@ -856,16 +776,14 @@ def load_temps(cur, temps_for_db: pd.DataFrame, window_start: datetime, window_e
     After upserting, deletes any rows that fall outside the current
     14-day window to keep the table bounded in size.
 
-    Expects a DataFrame with exactly five columns:
-        timestamp, is_forecast, air_temp, soil_6cm_temp, soil_18cm_temp
+    Expects a DataFrame with columns:
+        timestamp, is_forecast, air_temp, soil_6cm_temp
 
     Returns the number of rows upserted.
     """
     log.info("STAGE 5 — Load: upserting %d rows into temps...", len(temps_for_db))
 
     # Build list of tuples using zip() across individual columns.
-    # zip() is faster than iterrows() and avoids creating a row dict
-    # for each of the 336 iterations.
     # Null-safe: pd.isna() handles both float NaN and pd.NA (Int64),
     # converting missing values to Python None so psycopg2 stores NULL.
     rows = list(zip(
@@ -873,46 +791,36 @@ def load_temps(cur, temps_for_db: pd.DataFrame, window_start: datetime, window_e
         temps_for_db["is_forecast"].astype(bool),
         [None if pd.isna(v) else int(v) for v in temps_for_db["air_temp"]],
         [None if pd.isna(v) else int(v) for v in temps_for_db["soil_6cm_temp"]],
-        [None if pd.isna(v) else int(v) for v in temps_for_db["soil_18cm_temp"]],
     ))
 
     psycopg2.extras.execute_values(cur, """
-        INSERT INTO temps (timestamp, is_forecast, air_temp, soil_6cm_temp, soil_18cm_temp)
+        INSERT INTO temps (timestamp, is_forecast, air_temp, soil_6cm_temp)
         VALUES %s
         ON CONFLICT (timestamp) DO UPDATE SET
-            is_forecast    = EXCLUDED.is_forecast,
-            air_temp       = EXCLUDED.air_temp,
-            soil_6cm_temp  = EXCLUDED.soil_6cm_temp,
-            soil_18cm_temp = EXCLUDED.soil_18cm_temp,
-            fetched_at     = NOW()
+            is_forecast   = EXCLUDED.is_forecast,
+            air_temp      = EXCLUDED.air_temp,
+            soil_6cm_temp = EXCLUDED.soil_6cm_temp,
+            fetched_at    = NOW()
     """, rows)
 
-    # Remove any rows that are now outside the current 14-day window
-    # defined by the current API payload. This is more precise than
-    # using NOW() in case the timestamp coverage is not exactly +/-7 days.
+    # Remove any rows now outside the current 14-day window
     cur.execute("""
         DELETE FROM temps
-        WHERE timestamp < %s
-           OR timestamp > %s
+        WHERE timestamp < %s OR timestamp > %s
     """, (window_start, window_end))
     deleted = cur.rowcount
     if deleted > 0:
-        log.debug(
-            "  Removed %d stale temps row(s) outside the 14-day window.", deleted
-        )
+        log.debug("  Removed %d stale temps row(s) outside the 14-day window.", deleted)
 
     log.info("  temps load complete: %d rows upserted.", len(temps_for_db))
     return len(rows)
 
 
-def load_risk(cur, risk_rows: list[dict]) -> int:
+def load_risk(cur, risk_rows: list[RiskRow]) -> int:
     """
     Replace all risk rows with freshly computed assessments.
-
-    Delete-then-insert (rather than upsert) ensures no stale rows
-    remain if the plant list changes or a plant's planting type
-    changes between pipeline runs.
-
+    Delete-then-insert ensures no stale rows remain if the
+    plant list changes between pipeline runs.
     Returns the number of rows inserted.
     """
     log.info("  Loading %d risk rows...", len(risk_rows))
@@ -923,19 +831,17 @@ def load_risk(cur, risk_rows: list[dict]) -> int:
 
     psycopg2.extras.execute_values(cur, """
         INSERT INTO risk (
-            plant_id, planting_type, risk_level, risk_desc,
-            min_14day_air, min_14day_soil6cm, min_14day_soil18cm,
+            plant_id, risk_level, risk_desc,
+            min_14day_air, min_14day_soil6cm,
             window_start, window_end
         ) VALUES %s
     """, [
         (
             r["plant_id"],
-            r["planting_type"],
             r["risk_level"],
             r["risk_desc"],
             r["min_14day_air"],
             r["min_14day_soil6cm"],
-            r["min_14day_soil18cm"],
             r["window_start"],
             r["window_end"],
         )
@@ -955,14 +861,14 @@ def load_risk(cur, risk_rows: list[dict]) -> int:
 # pipeline and the Dash layout/callbacks.
 #
 #   risk_df:
-#       One row per plant per planting type.
+#       One row per plant with risk level and metadata.
 #       Joined with plants and category so the Dash app has
 #       everything it needs for the recommendation list and
 #       category filters without additional queries.
 #
 #   temps_out_df:
 #       One row per hourly timestamp.
-#       Used directly for the air temp, soil 6cm, and soil 18cm
+#       Used directly for the air temp and soil 6cm
 #       time-series charts in the temperature dashboard.
 # ============================================================
 
@@ -971,9 +877,9 @@ def prepare_analytics(cur) -> tuple[pd.DataFrame, pd.DataFrame]:
     Query finalized datasets from the DB for the Dash application.
 
     Returns:
-        risk_df     (pd.DataFrame): risk assessments joined with plant and
-                                    category data, ordered by risk level then
-                                    category then plant name.
+        risk_df      (pd.DataFrame): risk assessments joined with plant and
+                                     category data, ordered by risk level then
+                                     category then plant name.
         temps_out_df (pd.DataFrame): hourly temperature readings ordered
                                      chronologically.
     """
@@ -987,19 +893,15 @@ def prepare_analytics(cur) -> tuple[pd.DataFrame, pd.DataFrame]:
             r.risk_id,
             p.common_name,
             c.category_name,
-            r.planting_type,
             r.risk_level,
             r.risk_desc,
             r.min_14day_air,
             r.min_14day_soil6cm,
-            r.min_14day_soil18cm,
             r.window_start,
             r.window_end,
             r.risk_time,
             p.min_soil_temp_6cm,
             p.opt_soil_temp_6cm,
-            p.min_soil_temp_18cm,
-            p.opt_soil_temp_18cm,
             p.min_air_temp,
             p.opt_air_temp
         FROM risk r
@@ -1014,17 +916,17 @@ def prepare_analytics(cur) -> tuple[pd.DataFrame, pd.DataFrame]:
             c.category_name,
             p.common_name
     """)
-    risk_cols  = [desc[0] for desc in cur.description]
-    risk_df    = pd.DataFrame(cur.fetchall(), columns=risk_cols)
+    risk_cols = [desc[0] for desc in cur.description]
+    risk_df   = pd.DataFrame(cur.fetchall(), columns=risk_cols)
 
-    # Temperature dataset — all hourly readings for the charts.
+    # Temperature dataset — air and soil 6cm hourly readings for charts
     cur.execute("""
-        SELECT timestamp, is_forecast, air_temp, soil_6cm_temp, soil_18cm_temp
+        SELECT timestamp, is_forecast, air_temp, soil_6cm_temp
         FROM temps
         ORDER BY timestamp
     """)
-    temps_cols    = [desc[0] for desc in cur.description]
-    temps_out_df  = pd.DataFrame(cur.fetchall(), columns=temps_cols)
+    temps_cols   = [desc[0] for desc in cur.description]
+    temps_out_df = pd.DataFrame(cur.fetchall(), columns=temps_cols)
 
     log.info(
         "  Analytics ready — risk_df: %d rows | temps_df: %d rows.",
@@ -1045,7 +947,6 @@ def prepare_analytics(cur) -> tuple[pd.DataFrame, pd.DataFrame]:
 # rolls back so the database is never left in a partial state.
 #
 # Returns (risk_df, temps_df) on success for use by Dash.
-# Re-raises exceptions on failure so Dash can handle them.
 # ============================================================
 
 def run_etl() -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -1057,13 +958,11 @@ def run_etl() -> tuple[pd.DataFrame, pd.DataFrame]:
         risk_df, temps_df = run_etl()
 
     Returns:
-        risk_df     (pd.DataFrame): planting risk assessments with plant/category
-                                    metadata — used for the recommendation list.
-        temps_df    (pd.DataFrame): hourly temperature readings — used for charts.
-
-    Raises RuntimeError on any critical failure (API down, DB unreachable,
-    data validation failure). The Dash app should catch this and display
-    an appropriate error state to the user.
+        risk_df   (pd.DataFrame): seed germination risk assessments with
+                                  plant/category metadata — for the
+                                  recommendation list.
+        temps_df  (pd.DataFrame): hourly air and 6cm soil temperature
+                                  readings — for the charts.
     """
     log.info("=" * 60)
     log.info("Louisville Planting Guide App — ETL pipeline starting.")
@@ -1078,9 +977,8 @@ def run_etl() -> tuple[pd.DataFrame, pd.DataFrame]:
         # Stage 2: Clean and normalize the raw API response
         temps_clean = clean_temperatures(raw)
 
-        # Stage 4a — Validate temps before touching the DB.
-        # Run outside the DB connection so a bad API response
-        # does not open a transaction unnecessarily.
+        # Stage 4a: Validate temps before opening a DB connection.
+        # A bad API response shouldn't start a transaction unnecessarily.
         if not validate_temps(temps_clean):
             raise RuntimeError(
                 "Temperature data failed critical validation. "
@@ -1095,20 +993,22 @@ def run_etl() -> tuple[pd.DataFrame, pd.DataFrame]:
             # in-memory temps DataFrame and the plants table in the DB
             risk_rows = compute_risk(cur, temps_clean)
 
-            # Stage 4b — Validate risk rows before loading
+            # Stage 4b: Validate risk rows before loading
             if not validate_risk(risk_rows, cur):
                 raise RuntimeError(
                     "Risk rows failed validation. Pipeline aborted."
                 )
 
             # Drop raw float columns — used only in Stages 3 and 4a.
-            # Pass only the five DB columns to load_temps().
+            # Pass only the four DB columns to load_temps().
             temps_for_db = temps_clean[[
                 "timestamp", "is_forecast",
-                "air_temp", "soil_6cm_temp", "soil_18cm_temp",
+                "air_temp", "soil_6cm_temp",
             ]]
+
+            # Compute window bounds for the stale-row cleanup in load_temps
             window_start = temps_clean["timestamp"].min()
-            window_end = temps_clean["timestamp"].max()
+            window_end   = temps_clean["timestamp"].max()
 
             # Stage 5: Load temps (upsert) and risk (replace) into DB
             load_temps(cur, temps_for_db, window_start, window_end)
@@ -1119,7 +1019,6 @@ def run_etl() -> tuple[pd.DataFrame, pd.DataFrame]:
             # Transaction commits here when the with block exits cleanly
 
     except RuntimeError:
-        # Re-raise RuntimeErrors as-is (already logged at the source)
         raise
     except psycopg2.OperationalError as e:
         log.error("Database connection failed: %s", e)

@@ -16,12 +16,6 @@
 # load_dotenv    — loads environment variables from a .env file
 # os             — reads environment variables at runtime
 # sys            — used to exit with an error code on failure
-#
-# CHANGE: removed `from sqlalchemy import create_engine, text`
-#   SQLAlchemy was imported in the notebook but never used.
-#   Unused imports add confusion and unnecessary dependencies,
-#   so it has been removed. If SQLAlchemy is needed later for
-#   the Dash app's database layer, add it back at that point.
 # ============================================================
 
 import psycopg2
@@ -49,14 +43,6 @@ load_dotenv()
 #
 # Add .env to your .gitignore so it is never committed to
 # version control.
-#
-# CHANGE: removed hardcoded credentials from DB_CONFIG.
-#   The notebook contained a real Supabase host and password
-#   written directly into the code. Hardcoded credentials are
-#   a serious security risk — if this file is committed to
-#   version control (e.g. GitHub), those credentials become
-#   publicly visible. All sensitive values must come from
-#   environment variables or a .env file.
 # ============================================================
 
 DB_CONFIG = {
@@ -73,16 +59,6 @@ def get_connection_string() -> str:
     """
     Builds a psycopg2-compatible DSN (Data Source Name) string
     from DB_CONFIG. Used as the argument to psycopg2.connect().
-
-    CHANGE: renamed from get_database_url() to get_connection_string()
-      to better reflect that this returns a psycopg2 DSN, not a
-      SQLAlchemy-style URL (postgresql://user:pass@host/db).
-      The distinction matters if SQLAlchemy is added later.
-
-    CHANGE: sslmode is now included here, pulled from DB_CONFIG
-      rather than hardcoded at the call site. This makes it
-      configurable per environment (local dev may not need SSL,
-      but Supabase production does).
     """
     return (
         f"host={DB_CONFIG['host']} "
@@ -133,9 +109,9 @@ COMMENT ON COLUMN category.category_desc IS 'Human-readable description shown in
 """
 
 # plants: static reference table loaded from the soil temperature
-# spreadsheet. Stores per-plant temperature thresholds for both
-# seed (6cm) and transplant (18cm) planting types. Loaded once
-# at setup; does not change at runtime.
+# spreadsheet. Stores per-plant temperature thresholds for seed
+# germination at 6cm depth only. Loaded once at setup; does not
+# change at runtime.
 CREATE_PLANTS = """
 CREATE TABLE plants (
     plant_id            SERIAL   PRIMARY KEY,
@@ -145,25 +121,18 @@ CREATE TABLE plants (
                                  ON DELETE RESTRICT,
     min_soil_temp_6cm   FLOAT    NOT NULL CHECK (min_soil_temp_6cm >= 0),
     opt_soil_temp_6cm   FLOAT    NOT NULL CHECK (opt_soil_temp_6cm >= min_soil_temp_6cm),
-    min_soil_temp_18cm  FLOAT             CHECK (min_soil_temp_18cm >= 0),
-    opt_soil_temp_18cm  FLOAT             CHECK (
-                                              opt_soil_temp_18cm IS NULL
-                                              OR opt_soil_temp_18cm >= min_soil_temp_18cm
-                                          ),
     min_air_temp        FLOAT    NOT NULL,
     opt_air_temp        FLOAT    NOT NULL CHECK (opt_air_temp >= min_air_temp),
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-COMMENT ON TABLE  plants                    IS 'Static plant reference data. One row per plant.';
-COMMENT ON COLUMN plants.plant_id           IS 'Surrogate primary key.';
-COMMENT ON COLUMN plants.common_name        IS 'Human-readable plant name (e.g. tomato, basil).';
-COMMENT ON COLUMN plants.category_id        IS 'FK to category table.';
-COMMENT ON COLUMN plants.min_soil_temp_6cm  IS 'Minimum soil temp in F at 6cm for seed germination.';
-COMMENT ON COLUMN plants.opt_soil_temp_6cm  IS 'Optimal soil temp in F at 6cm for seed germination.';
-COMMENT ON COLUMN plants.min_soil_temp_18cm IS 'Minimum soil temp in F at 18cm for transplants. NULL if unavailable.';
-COMMENT ON COLUMN plants.opt_soil_temp_18cm IS 'Optimal soil temp in F at 18cm for transplants. NULL if unavailable.';
-COMMENT ON COLUMN plants.min_air_temp       IS 'Minimum air temp in F required for safe planting.';
-COMMENT ON COLUMN plants.opt_air_temp       IS 'Optimal air temp in F for best results.';
+COMMENT ON TABLE  plants                   IS 'Static plant reference data. One row per plant.';
+COMMENT ON COLUMN plants.plant_id          IS 'Surrogate primary key.';
+COMMENT ON COLUMN plants.common_name       IS 'Human-readable plant name (e.g. tomato, basil).';
+COMMENT ON COLUMN plants.category_id       IS 'FK to category table.';
+COMMENT ON COLUMN plants.min_soil_temp_6cm IS 'Minimum soil temp in F at 6cm for seed germination.';
+COMMENT ON COLUMN plants.opt_soil_temp_6cm IS 'Optimal soil temp in F at 6cm for seed germination.';
+COMMENT ON COLUMN plants.min_air_temp      IS 'Minimum air temp in F required for safe planting.';
+COMMENT ON COLUMN plants.opt_air_temp      IS 'Optimal air temp in F for best results.';
 CREATE INDEX idx_plants_category_id ON plants (category_id);
 """
 
@@ -177,22 +146,21 @@ CREATE TABLE temps (
     is_forecast     BOOLEAN      NOT NULL,
     air_temp        INTEGER      NOT NULL,
     soil_6cm_temp   INTEGER      NOT NULL,
-    soil_18cm_temp  INTEGER      NOT NULL,
     fetched_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
-COMMENT ON TABLE  temps                IS 'Hourly air and soil temperature readings from Open Meteo API.';
-COMMENT ON COLUMN temps.timestamp      IS 'Datetime of the reading (America/New_York, stored as UTC). Natural primary key.';
-COMMENT ON COLUMN temps.is_forecast    IS 'TRUE = predicted future reading; FALSE = actual past reading.';
-COMMENT ON COLUMN temps.air_temp       IS 'Air temperature in Fahrenheit at 2m height.';
-COMMENT ON COLUMN temps.soil_6cm_temp  IS 'Soil temperature in Fahrenheit at 6cm depth (seeds).';
-COMMENT ON COLUMN temps.soil_18cm_temp IS 'Soil temperature in Fahrenheit at 18cm depth (transplants).';
-COMMENT ON COLUMN temps.fetched_at     IS 'When this row was inserted from the API.';
+COMMENT ON TABLE  temps               IS 'Hourly air and soil temperature readings from Open Meteo API.';
+COMMENT ON COLUMN temps.timestamp     IS 'Datetime of the reading (America/New_York, stored as UTC). Natural primary key.';
+COMMENT ON COLUMN temps.is_forecast   IS 'TRUE = predicted future reading; FALSE = actual past reading.';
+COMMENT ON COLUMN temps.air_temp      IS 'Air temperature in Fahrenheit at 2m height.';
+COMMENT ON COLUMN temps.soil_6cm_temp IS 'Soil temperature in Fahrenheit at 6cm depth for seed germination.';
+COMMENT ON COLUMN temps.fetched_at    IS 'When this row was inserted from the API.';
 CREATE INDEX idx_temps_timestamp ON temps (timestamp DESC);
 """
 
 # risk: derived results table. Computed by the risk engine each
-# time the app runs. One row per plant per planting type, storing
-# the summarized 14-day temperature window and resulting risk tier.
+# time the app runs. One row per plant storing the summarized
+# 14-day temperature window and resulting risk tier for seed
+# germination based on 6cm soil temperatures.
 CREATE_RISK = """
 CREATE TABLE risk (
     risk_id             SERIAL       PRIMARY KEY,
@@ -200,27 +168,23 @@ CREATE TABLE risk (
                                      REFERENCES plants (plant_id)
                                      ON DELETE CASCADE,
     risk_time           TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    planting_type       TEXT         NOT NULL CHECK (planting_type IN ('seed', 'transplant')),
     risk_level          TEXT         NOT NULL CHECK (risk_level IN ('low', 'medium', 'high')),
     risk_desc           TEXT,
     min_14day_air       INTEGER      NOT NULL,
     min_14day_soil6cm   INTEGER      NOT NULL,
-    min_14day_soil18cm  INTEGER      NOT NULL,
     window_start        TIMESTAMPTZ  NOT NULL,
     window_end          TIMESTAMPTZ  NOT NULL
 );
-COMMENT ON TABLE  risk                    IS 'Risk assessment computed per plant per app run.';
-COMMENT ON COLUMN risk.risk_id            IS 'Surrogate primary key.';
-COMMENT ON COLUMN risk.plant_id           IS 'FK to plants table.';
-COMMENT ON COLUMN risk.risk_time          IS 'Timestamp when this assessment was computed.';
-COMMENT ON COLUMN risk.planting_type      IS 'Whether assessment is for seed or transplant planting.';
-COMMENT ON COLUMN risk.risk_level         IS 'Resulting risk tier: low, medium, or high.';
-COMMENT ON COLUMN risk.risk_desc          IS 'Human-readable explanation of the risk level assigned.';
-COMMENT ON COLUMN risk.min_14day_air      IS 'Lowest air temp in F across the 14-day window.';
-COMMENT ON COLUMN risk.min_14day_soil6cm  IS 'Lowest soil temp in F at 6cm across the 14-day window.';
-COMMENT ON COLUMN risk.min_14day_soil18cm IS 'Lowest soil temp in F at 18cm across the 14-day window.';
-COMMENT ON COLUMN risk.window_start       IS 'Start of the 14-day temperature window used in this assessment.';
-COMMENT ON COLUMN risk.window_end         IS 'End of the 14-day temperature window used in this assessment.';
+COMMENT ON TABLE  risk                   IS 'Seed germination risk assessment computed per plant per app run.';
+COMMENT ON COLUMN risk.risk_id           IS 'Surrogate primary key.';
+COMMENT ON COLUMN risk.plant_id          IS 'FK to plants table.';
+COMMENT ON COLUMN risk.risk_time         IS 'Timestamp when this assessment was computed.';
+COMMENT ON COLUMN risk.risk_level        IS 'Resulting risk tier: low, medium, or high.';
+COMMENT ON COLUMN risk.risk_desc         IS 'Human-readable explanation of the risk level assigned.';
+COMMENT ON COLUMN risk.min_14day_air     IS 'Lowest air temp in F across the 14-day window.';
+COMMENT ON COLUMN risk.min_14day_soil6cm IS 'Lowest soil temp in F at 6cm across the 14-day window.';
+COMMENT ON COLUMN risk.window_start      IS 'Start of the 14-day temperature window used in this assessment.';
+COMMENT ON COLUMN risk.window_end        IS 'End of the 14-day temperature window used in this assessment.';
 CREATE INDEX idx_risk_plant_id  ON risk (plant_id);
 CREATE INDEX idx_risk_risk_time ON risk (risk_time DESC);
 """
@@ -235,7 +199,6 @@ CREATE INDEX idx_risk_risk_time ON risk (risk_time DESC);
 # PLANTS tuples follow this column order:
 #   (common_name, category_name,
 #    min_soil_6cm, opt_soil_6cm,
-#    min_soil_18cm, opt_soil_18cm,  <- None if transplant data unavailable
 #    min_air, opt_air)
 #
 # Temperature values are in Fahrenheit.
@@ -251,56 +214,57 @@ CATEGORIES = [
 ]
 
 PLANTS = [
+    # (common_name, category, min_soil_6cm, opt_soil_6cm, min_air, opt_air)
     # Vegetables / fruit
-    ("asparagus",       "vegetable/fruit",  50, 77,   50,   75,   40, 75),
-    ("bean",            "vegetable/fruit",  60, 85,   60,   80,   50, 80),
-    ("beet",            "vegetable/fruit",  40, 85,   40,   75,   40, 75),
-    ("blackberry",      "vegetable/fruit",  45, 75,   45,   70,   40, 75),
-    ("cabbage",         "vegetable/fruit",  45, 85,   40,   75,   40, 75),
-    ("carrot",          "vegetable/fruit",  45, 85,   45,   75,   40, 75),
-    ("celery",          "vegetable/fruit",  60, 70,   60,   70,   50, 75),
-    ("chard",           "vegetable/fruit",  50, 85,   50,   75,   40, 75),
-    ("collard",         "vegetable/fruit",  45, 85,   45,   75,   40, 75),
-    ("cucumber",        "vegetable/fruit",  60, 95,   65,   85,   60, 85),
-    ("eggplant",        "vegetable/fruit",  60, 95,   65,   85,   60, 85),
-    ("gourds",          "vegetable/fruit",  70, 95,   70,   90,   60, 85),
-    ("ground cherry",   "vegetable/fruit",  65, 85,   65,   80,   55, 80),
-    ("leek",            "vegetable/fruit",  50, 77,   50,   70,   40, 75),
-    ("lettuce",         "vegetable/fruit",  35, 75,   35,   65,   40, 70),
-    ("melon",           "vegetable/fruit",  70, 95,   70,   90,   60, 85),
-    ("okra",            "vegetable/fruit",  65, 95,   65,   90,   60, 90),
-    ("onion",           "vegetable/fruit",  35, 85,   35,   75,   40, 75),
-    ("parsnip",         "vegetable/fruit",  35, 70,   35,   65,   40, 70),
-    ("sweet pea",       "vegetable/fruit",  40, 75,   40,   70,   40, 70),
-    ("southern pea",    "vegetable/fruit",  60, 95,   60,   85,   55, 85),
-    ("pepper",          "vegetable/fruit",  65, 95,   65,   85,   60, 85),
-    ("pumpkin",         "vegetable/fruit",  60, 95,   65,   85,   60, 85),
-    ("radish",          "vegetable/fruit",  40, 90,   40,   80,   40, 75),
-    ("sorghum",         "vegetable/fruit",  60, 95,   60,   90,   60, 90),
-    ("spinach",         "vegetable/fruit",  35, 75,   35,   65,   40, 65),
-    ("squash",          "vegetable/fruit",  60, 95,   65,   85,   60, 85),
-    ("strawberry",      "vegetable/fruit",  50, 80,   50,   75,   40, 75),
-    ("sweet corn",      "vegetable/fruit",  50, 95,   55,   85,   55, 85),
-    ("tomatillo",       "vegetable/fruit",  65, 85,   65,   80,   55, 80),
-    ("tomato",          "vegetable/fruit",  60, 85,   65,   80,   55, 80),
-    ("turnip",          "vegetable/fruit",  40, 85,   40,   75,   40, 75),
-    # Flowers — cosmos and senna have no transplant data (None)
-    ("cosmos",          "flower",           65, 85,   None, None, 55, 80),
-    ("marigold",        "flower",           65, 85,   65,   80,   55, 80),
-    ("senna",           "flower",           65, 85,   None, None, 55, 80),
-    ("sunflower",       "flower",           55, 85,   55,   80,   50, 80),
-    ("zinnia",          "flower",           70, 85,   70,   85,   60, 85),
+    ("asparagus",       "vegetable/fruit",  50, 77,   40, 75),
+    ("bean",            "vegetable/fruit",  60, 85,   50, 80),
+    ("beet",            "vegetable/fruit",  40, 85,   40, 75),
+    ("blackberry",      "vegetable/fruit",  45, 75,   40, 75),
+    ("cabbage",         "vegetable/fruit",  45, 85,   40, 75),
+    ("carrot",          "vegetable/fruit",  45, 85,   40, 75),
+    ("celery",          "vegetable/fruit",  60, 70,   50, 75),
+    ("chard",           "vegetable/fruit",  50, 85,   40, 75),
+    ("collard",         "vegetable/fruit",  45, 85,   40, 75),
+    ("cucumber",        "vegetable/fruit",  60, 95,   60, 85),
+    ("eggplant",        "vegetable/fruit",  60, 95,   60, 85),
+    ("gourds",          "vegetable/fruit",  70, 95,   60, 85),
+    ("ground cherry",   "vegetable/fruit",  65, 85,   55, 80),
+    ("leek",            "vegetable/fruit",  50, 77,   40, 75),
+    ("lettuce",         "vegetable/fruit",  35, 75,   40, 70),
+    ("melon",           "vegetable/fruit",  70, 95,   60, 85),
+    ("okra",            "vegetable/fruit",  65, 95,   60, 90),
+    ("onion",           "vegetable/fruit",  35, 85,   40, 75),
+    ("parsnip",         "vegetable/fruit",  35, 70,   40, 70),
+    ("sweet pea",       "vegetable/fruit",  40, 75,   40, 70),
+    ("southern pea",    "vegetable/fruit",  60, 95,   55, 85),
+    ("pepper",          "vegetable/fruit",  65, 95,   60, 85),
+    ("pumpkin",         "vegetable/fruit",  60, 95,   60, 85),
+    ("radish",          "vegetable/fruit",  40, 90,   40, 75),
+    ("sorghum",         "vegetable/fruit",  60, 95,   60, 90),
+    ("spinach",         "vegetable/fruit",  35, 75,   40, 65),
+    ("squash",          "vegetable/fruit",  60, 95,   60, 85),
+    ("strawberry",      "vegetable/fruit",  50, 80,   40, 75),
+    ("sweet corn",      "vegetable/fruit",  50, 95,   55, 85),
+    ("tomatillo",       "vegetable/fruit",  65, 85,   55, 80),
+    ("tomato",          "vegetable/fruit",  60, 85,   55, 80),
+    ("turnip",          "vegetable/fruit",  40, 85,   40, 75),
+    # Flowers
+    ("cosmos",          "flower",           65, 85,   55, 80),
+    ("marigold",        "flower",           65, 85,   55, 80),
+    ("senna",           "flower",           65, 85,   55, 80),
+    ("sunflower",       "flower",           55, 85,   50, 80),
+    ("zinnia",          "flower",           70, 85,   60, 85),
     # Herbs
-    ("basil",           "herb",             65, 85,   65,   80,   60, 80),
-    ("chives",          "herb",             50, 85,   50,   75,   40, 75),
-    ("cilantro",        "herb",             55, 75,   55,   70,   40, 70),
-    ("dill",            "herb",             60, 70,   60,   70,   45, 70),
-    ("mint",            "herb",             55, 70,   55,   70,   45, 70),
-    ("mustard",         "herb",             40, 75,   40,   70,   40, 70),
-    ("oregano",         "herb",             65, 85,   65,   80,   55, 80),
-    ("parsley",         "herb",             50, 85,   50,   75,   40, 75),
-    ("sage",            "herb",             60, 85,   60,   80,   50, 80),
-    ("thyme",           "herb",             60, 85,   60,   80,   50, 80),
+    ("basil",           "herb",             65, 85,   60, 80),
+    ("chives",          "herb",             50, 85,   40, 75),
+    ("cilantro",        "herb",             55, 75,   40, 70),
+    ("dill",            "herb",             60, 70,   45, 70),
+    ("mint",            "herb",             55, 70,   45, 70),
+    ("mustard",         "herb",             40, 75,   40, 70),
+    ("oregano",         "herb",             65, 85,   55, 80),
+    ("parsley",         "herb",             50, 85,   40, 75),
+    ("sage",            "herb",             60, 85,   50, 80),
+    ("thyme",           "herb",             60, 85,   50, 80),
 ]
 
 
@@ -312,10 +276,6 @@ def run_ddl(cur, sql: str, label: str) -> None:
     """
     Executes a single DDL statement and prints a status line.
     Called once per table during the create phase.
-
-    CHANGE: added type hints to parameters and return type.
-      Type hints make the expected inputs and outputs explicit,
-      which helps catch bugs early and improves readability.
     """
     print(f"  {label}... ", end="", flush=True)
     cur.execute(sql)
@@ -389,8 +349,6 @@ def verify(cur) -> None:
 # ============================================================
 
 def main() -> None:
-    # Initialize to None so the finally block can safely check
-    # whether a connection/cursor was opened before trying to close it.
     conn = None
     cur = None
 
@@ -398,7 +356,7 @@ def main() -> None:
     print("Connecting to database...")
     try:
         conn = psycopg2.connect(get_connection_string())
-        conn.autocommit = False  # All changes go through explicit commit()
+        conn.autocommit = False
         cur = conn.cursor()
         print("  Connected.")
     except psycopg2.OperationalError as e:
@@ -412,10 +370,6 @@ def main() -> None:
         print("  Done.")
 
         # -- Step 3: create tables --------------------------------
-        # CHANGE: DDL statements are iterated from a list rather
-        #   than called individually. Each table gets its own
-        #   try/except so a failure names the specific table that
-        #   caused the error, making debugging faster.
         print("\nCreating tables...")
         ddl_statements = [
             (CREATE_CATEGORY, "category"),
@@ -441,17 +395,10 @@ def main() -> None:
         print(f"  Inserted {len(CATEGORIES)} categories.")
 
         # -- Step 4b: seed plants ---------------------------------
-        # Build a name→id lookup from the just-inserted categories
-        # so plant rows can reference category_id by name rather
-        # than by hardcoded integer.
         print("\nSeeding plants...")
         cur.execute("SELECT category_name, category_id FROM category")
         cat_map = {name: cid for name, cid in cur.fetchall()}
 
-        # CHANGE: added pre-insert validation for category names.
-        #   Without this, a typo in PLANTS would produce a generic
-        #   foreign key error. This catches the problem earlier with
-        #   a clear message showing exactly which name is wrong.
         unknown_cats = {cat for _, cat, *_ in PLANTS if cat not in cat_map}
         if unknown_cats:
             print(f"\nERROR: Unknown category name(s) in PLANTS: {unknown_cats}")
@@ -459,15 +406,14 @@ def main() -> None:
             sys.exit(1)
 
         plant_rows = [
-            (name, cat_map[cat], min6, opt6, min18, opt18, min_air, opt_air)
-            for name, cat, min6, opt6, min18, opt18, min_air, opt_air in PLANTS
+            (name, cat_map[cat], min6, opt6, min_air, opt_air)
+            for name, cat, min6, opt6, min_air, opt_air in PLANTS
         ]
 
         execute_values(cur, """
             INSERT INTO plants (
                 common_name, category_id,
                 min_soil_temp_6cm, opt_soil_temp_6cm,
-                min_soil_temp_18cm, opt_soil_temp_18cm,
                 min_air_temp, opt_air_temp
             ) VALUES %s
         """, plant_rows)
@@ -479,15 +425,12 @@ def main() -> None:
         verify(cur)
 
     except Exception as e:
-        # Catches any unhandled error during seeding or verification
-        # and rolls back the entire transaction.
         if conn:
             conn.rollback()
         print(f"\nError — transaction rolled back: {e}")
         sys.exit(1)
 
     finally:
-        # Always close cursor and connection, even if an error occurred.
         if cur:
             cur.close()
         if conn:
