@@ -107,6 +107,12 @@ AIR_TEMP_MAX_PLAUSIBLE  = 120.0
 SOIL_TEMP_MIN_PLAUSIBLE =   0.0
 SOIL_TEMP_MAX_PLAUSIBLE = 120.0
 
+# Universal air temperature threshold applied equally to all plants (°F).
+# If the 14-day minimum air temp drops below this value the plant is
+# High Risk regardless of soil temperature. Soil temperature thresholds
+# are per-plant; air temperature is not.
+UNIVERSAL_MIN_AIR_TEMP_F = 40
+
 # Logging configuration
 LOG_FILE  = os.getenv("LOG_FILE",  "LPAmain.log")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -390,10 +396,10 @@ def clean_temperatures(raw: dict) -> pd.DataFrame:
 #
 # Risk logic:
 #   HIGH:   min_soil_6cm < plant.min_soil_temp_6cm
-#           OR min_air < plant.min_air_temp
+#           OR min_air < UNIVERSAL_MIN_AIR_TEMP_F (40°F, same for all plants)
 #   LOW:    min_soil_6cm >= plant.opt_soil_temp_6cm
-#           AND min_air >= plant.opt_air_temp
-#   MEDIUM: all other cases (above minimum but not at optimal)
+#           AND min_air >= UNIVERSAL_MIN_AIR_TEMP_F
+#   MEDIUM: all other cases (soil above minimum but not yet at optimal)
 # ============================================================
 
 class RiskRow(TypedDict):
@@ -411,15 +417,16 @@ def _score_risk(
     min_air:             float,
     min_soil_threshold:  float,
     opt_soil_threshold:  float,
-    min_air_threshold:   float,
-    opt_air_threshold:   float,
 ) -> tuple[str, str]:
     """
     Core risk scoring logic for a single plant.
-    Compares the 14-day minimum soil (6cm) and air temps against
-    the plant's thresholds and returns (risk_level, risk_desc).
+    Compares the 14-day minimum soil (6cm) temp against the
+    plant's thresholds, and the 14-day minimum air temp against
+    the universal UNIVERSAL_MIN_AIR_TEMP_F threshold (40°F),
+    which applies equally to all plants.
+    Returns (risk_level, risk_desc).
     """
-    # HIGH RISK — at least one minimum threshold was breached
+    # HIGH RISK — minimum threshold breached
     if min_soil < min_soil_threshold:
         return (
             "high",
@@ -429,43 +436,35 @@ def _score_risk(
                 f"within the 14-day window. Not recommended."
             ),
         )
-    if min_air < min_air_threshold:
+    if min_air < UNIVERSAL_MIN_AIR_TEMP_F:
         return (
             "high",
             (
                 f"Air temperature ({min_air:.1f}°F) dropped below the minimum "
-                f"safe threshold ({min_air_threshold:.1f}°F) within the 14-day "
-                f"window. Not recommended."
+                f"safe threshold ({UNIVERSAL_MIN_AIR_TEMP_F}°F) within the "
+                f"14-day window. Not recommended."
             ),
         )
 
-    # LOW RISK — both soil and air at or above optimal for the full window
-    if min_soil >= opt_soil_threshold and min_air >= opt_air_threshold:
+    # LOW RISK — soil at or above optimal and air at or above 40°F
+    if min_soil >= opt_soil_threshold and min_air >= UNIVERSAL_MIN_AIR_TEMP_F:
         return (
             "low",
             (
-                f"Soil ({min_soil:.1f}°F) and air ({min_air:.1f}°F) temperatures "
-                f"remained at or above optimal levels throughout the 14-day window. "
-                f"Recommended."
+                f"Soil ({min_soil:.1f}°F) temperature remained at or above "
+                f"optimal levels and air temperature ({min_air:.1f}°F) stayed "
+                f"at or above {UNIVERSAL_MIN_AIR_TEMP_F}°F throughout the "
+                f"14-day window. Recommended."
             ),
         )
 
-    # MEDIUM RISK — above minimum thresholds but not yet at optimal
-    below_opt = []
-    if min_soil < opt_soil_threshold:
-        below_opt.append(
-            f"soil temp ({min_soil:.1f}°F, optimal {opt_soil_threshold:.1f}°F)"
-        )
-    if min_air < opt_air_threshold:
-        below_opt.append(
-            f"air temp ({min_air:.1f}°F, optimal {opt_air_threshold:.1f}°F)"
-        )
-
+    # MEDIUM RISK — above minimums but soil not yet at optimal
     return (
         "medium",
         (
-            f"Conditions are above minimums but not yet optimal: "
-            f"{' and '.join(below_opt)}. May advise waiting."
+            f"Conditions are above minimums but soil temperature "
+            f"({min_soil:.1f}°F) has not consistently reached the optimal "
+            f"level ({opt_soil_threshold:.1f}°F). May advise waiting."
         ),
     )
 
@@ -514,12 +513,13 @@ def compute_risk(cur, temps_clean: pd.DataFrame) -> list[RiskRow]:
         min_air, min_soil_6cm,
     )
 
-    # Fetch all plants and their temperature thresholds from the DB
+    # Fetch all plants and their soil temperature thresholds from the DB.
+    # Air temperature risk uses the universal constant UNIVERSAL_MIN_AIR_TEMP_F
+    # rather than per-plant values, so no air temp columns are needed here.
     cur.execute("""
         SELECT
             plant_id, common_name,
-            min_soil_temp_6cm, opt_soil_temp_6cm,
-            min_air_temp,      opt_air_temp
+            min_soil_temp_6cm, opt_soil_temp_6cm
         FROM plants
         ORDER BY plant_id
     """)
@@ -531,7 +531,6 @@ def compute_risk(cur, temps_clean: pd.DataFrame) -> list[RiskRow]:
     for (
         plant_id, common_name,
         min_6cm, opt_6cm,
-        min_air_thresh, opt_air_thresh,
     ) in plants:
 
         risk_level, risk_desc = _score_risk(
@@ -539,8 +538,6 @@ def compute_risk(cur, temps_clean: pd.DataFrame) -> list[RiskRow]:
             min_air            = min_air,
             min_soil_threshold = min_6cm,
             opt_soil_threshold = opt_6cm,
-            min_air_threshold  = min_air_thresh,
-            opt_air_threshold  = opt_air_thresh,
         )
         risk_rows.append({
             "plant_id":          plant_id,
@@ -901,9 +898,7 @@ def prepare_analytics(cur) -> tuple[pd.DataFrame, pd.DataFrame]:
             r.window_end,
             r.risk_time,
             p.min_soil_temp_6cm,
-            p.opt_soil_temp_6cm,
-            p.min_air_temp,
-            p.opt_air_temp
+            p.opt_soil_temp_6cm
         FROM risk r
         JOIN plants   p ON p.plant_id    = r.plant_id
         JOIN category c ON c.category_id = p.category_id

@@ -121,8 +121,6 @@ CREATE TABLE plants (
                                  ON DELETE RESTRICT,
     min_soil_temp_6cm   FLOAT    NOT NULL CHECK (min_soil_temp_6cm >= 0),
     opt_soil_temp_6cm   FLOAT    NOT NULL CHECK (opt_soil_temp_6cm >= min_soil_temp_6cm),
-    min_air_temp        FLOAT    NOT NULL,
-    opt_air_temp        FLOAT    NOT NULL CHECK (opt_air_temp >= min_air_temp),
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 COMMENT ON TABLE  plants                   IS 'Static plant reference data. One row per plant.';
@@ -131,8 +129,6 @@ COMMENT ON COLUMN plants.common_name       IS 'Human-readable plant name (e.g. t
 COMMENT ON COLUMN plants.category_id       IS 'FK to category table.';
 COMMENT ON COLUMN plants.min_soil_temp_6cm IS 'Minimum soil temp in F at 6cm for seed germination.';
 COMMENT ON COLUMN plants.opt_soil_temp_6cm IS 'Optimal soil temp in F at 6cm for seed germination.';
-COMMENT ON COLUMN plants.min_air_temp      IS 'Minimum air temp in F required for safe planting.';
-COMMENT ON COLUMN plants.opt_air_temp      IS 'Optimal air temp in F for best results.';
 CREATE INDEX idx_plants_category_id ON plants (category_id);
 """
 
@@ -198,8 +194,10 @@ CREATE INDEX idx_risk_risk_time ON risk (risk_time DESC);
 #
 # PLANTS tuples follow this column order:
 #   (common_name, category_name,
-#    min_soil_6cm, opt_soil_6cm,
-#    min_air, opt_air)
+#    min_soil_6cm, opt_soil_6cm)
+#
+# Air temperature risk uses a universal threshold of 40°F for
+# all plants — see UNIVERSAL_MIN_AIR_TEMP_F in LPAmain.py.
 #
 # Temperature values are in Fahrenheit.
 # Sources:
@@ -214,57 +212,57 @@ CATEGORIES = [
 ]
 
 PLANTS = [
-    # (common_name, category, min_soil_6cm, opt_soil_6cm, min_air, opt_air)
+    # (common_name, category, min_soil_6cm, opt_soil_6cm)
     # Vegetables / fruit
-    ("asparagus",       "vegetable/fruit",  50, 77,   40, 75),
-    ("bean",            "vegetable/fruit",  60, 85,   50, 80),
-    ("beet",            "vegetable/fruit",  40, 85,   40, 75),
-    ("blackberry",      "vegetable/fruit",  45, 75,   40, 75),
-    ("cabbage",         "vegetable/fruit",  45, 85,   40, 75),
-    ("carrot",          "vegetable/fruit",  45, 85,   40, 75),
-    ("celery",          "vegetable/fruit",  60, 70,   50, 75),
-    ("chard",           "vegetable/fruit",  50, 85,   40, 75),
-    ("collard",         "vegetable/fruit",  45, 85,   40, 75),
-    ("cucumber",        "vegetable/fruit",  60, 95,   60, 85),
-    ("eggplant",        "vegetable/fruit",  60, 95,   60, 85),
-    ("gourds",          "vegetable/fruit",  70, 95,   60, 85),
-    ("ground cherry",   "vegetable/fruit",  65, 85,   55, 80),
-    ("leek",            "vegetable/fruit",  50, 77,   40, 75),
-    ("lettuce",         "vegetable/fruit",  35, 75,   40, 70),
-    ("melon",           "vegetable/fruit",  70, 95,   60, 85),
-    ("okra",            "vegetable/fruit",  65, 95,   60, 90),
-    ("onion",           "vegetable/fruit",  35, 85,   40, 75),
-    ("parsnip",         "vegetable/fruit",  35, 70,   40, 70),
-    ("sweet pea",       "vegetable/fruit",  40, 75,   40, 70),
-    ("southern pea",    "vegetable/fruit",  60, 95,   55, 85),
-    ("pepper",          "vegetable/fruit",  65, 95,   60, 85),
-    ("pumpkin",         "vegetable/fruit",  60, 95,   60, 85),
-    ("radish",          "vegetable/fruit",  40, 90,   40, 75),
-    ("sorghum",         "vegetable/fruit",  60, 95,   60, 90),
-    ("spinach",         "vegetable/fruit",  35, 75,   40, 65),
-    ("squash",          "vegetable/fruit",  60, 95,   60, 85),
-    ("strawberry",      "vegetable/fruit",  50, 80,   40, 75),
-    ("sweet corn",      "vegetable/fruit",  50, 95,   55, 85),
-    ("tomatillo",       "vegetable/fruit",  65, 85,   55, 80),
-    ("tomato",          "vegetable/fruit",  60, 85,   55, 80),
-    ("turnip",          "vegetable/fruit",  40, 85,   40, 75),
+    ("asparagus",       "vegetable/fruit",  50, 77),
+    ("bean",            "vegetable/fruit",  60, 85),
+    ("beet",            "vegetable/fruit",  40, 85),
+    ("blackberry",      "vegetable/fruit",  45, 75),
+    ("cabbage",         "vegetable/fruit",  45, 85),
+    ("carrot",          "vegetable/fruit",  45, 85),
+    ("celery",          "vegetable/fruit",  60, 70),
+    ("chard",           "vegetable/fruit",  50, 85),
+    ("collard",         "vegetable/fruit",  45, 85),
+    ("cucumber",        "vegetable/fruit",  60, 95),
+    ("eggplant",        "vegetable/fruit",  60, 95),
+    ("gourds",          "vegetable/fruit",  70, 95),
+    ("ground cherry",   "vegetable/fruit",  65, 85),
+    ("leek",            "vegetable/fruit",  50, 77),
+    ("lettuce",         "vegetable/fruit",  35, 75),
+    ("melon",           "vegetable/fruit",  70, 95),
+    ("okra",            "vegetable/fruit",  65, 95),
+    ("onion",           "vegetable/fruit",  35, 85),
+    ("parsnip",         "vegetable/fruit",  35, 70),
+    ("sweet pea",       "vegetable/fruit",  40, 75),
+    ("southern pea",    "vegetable/fruit",  60, 95),
+    ("pepper",          "vegetable/fruit",  65, 95),
+    ("pumpkin",         "vegetable/fruit",  60, 95),
+    ("radish",          "vegetable/fruit",  40, 90),
+    ("sorghum",         "vegetable/fruit",  60, 95),
+    ("spinach",         "vegetable/fruit",  35, 75),
+    ("squash",          "vegetable/fruit",  60, 95),
+    ("strawberry",      "vegetable/fruit",  50, 80),
+    ("sweet corn",      "vegetable/fruit",  50, 95),
+    ("tomatillo",       "vegetable/fruit",  65, 85),
+    ("tomato",          "vegetable/fruit",  60, 85),
+    ("turnip",          "vegetable/fruit",  40, 85),
     # Flowers
-    ("cosmos",          "flower",           65, 85,   55, 80),
-    ("marigold",        "flower",           65, 85,   55, 80),
-    ("senna",           "flower",           65, 85,   55, 80),
-    ("sunflower",       "flower",           55, 85,   50, 80),
-    ("zinnia",          "flower",           70, 85,   60, 85),
+    ("cosmos",          "flower",           65, 85),
+    ("marigold",        "flower",           65, 85),
+    ("senna",           "flower",           65, 85),
+    ("sunflower",       "flower",           55, 85),
+    ("zinnia",          "flower",           70, 85),
     # Herbs
-    ("basil",           "herb",             65, 85,   60, 80),
-    ("chives",          "herb",             50, 85,   40, 75),
-    ("cilantro",        "herb",             55, 75,   40, 70),
-    ("dill",            "herb",             60, 70,   45, 70),
-    ("mint",            "herb",             55, 70,   45, 70),
-    ("mustard",         "herb",             40, 75,   40, 70),
-    ("oregano",         "herb",             65, 85,   55, 80),
-    ("parsley",         "herb",             50, 85,   40, 75),
-    ("sage",            "herb",             60, 85,   50, 80),
-    ("thyme",           "herb",             60, 85,   50, 80),
+    ("basil",           "herb",             65, 85),
+    ("chives",          "herb",             50, 85),
+    ("cilantro",        "herb",             55, 75),
+    ("dill",            "herb",             60, 70),
+    ("mint",            "herb",             55, 70),
+    ("mustard",         "herb",             40, 75),
+    ("oregano",         "herb",             65, 85),
+    ("parsley",         "herb",             50, 85),
+    ("sage",            "herb",             60, 85),
+    ("thyme",           "herb",             60, 85),
 ]
 
 
@@ -324,7 +322,6 @@ def verify(cur) -> None:
     cur.execute("""
         SELECT common_name FROM plants
         WHERE opt_soil_temp_6cm < min_soil_temp_6cm
-           OR opt_air_temp < min_air_temp
     """)
     bad = cur.fetchall()
     if bad:
@@ -406,15 +403,14 @@ def main() -> None:
             sys.exit(1)
 
         plant_rows = [
-            (name, cat_map[cat], min6, opt6, min_air, opt_air)
-            for name, cat, min6, opt6, min_air, opt_air in PLANTS
+            (name, cat_map[cat], min6, opt6)
+            for name, cat, min6, opt6 in PLANTS
         ]
 
         execute_values(cur, """
             INSERT INTO plants (
                 common_name, category_id,
-                min_soil_temp_6cm, opt_soil_temp_6cm,
-                min_air_temp, opt_air_temp
+                min_soil_temp_6cm, opt_soil_temp_6cm
             ) VALUES %s
         """, plant_rows)
         print(f"  Inserted {len(plant_rows)} plants.")
