@@ -8,11 +8,11 @@ Interactive seed germination recommendation dashboard for Louisville, KY (Zone 7
 
 The app answers one practical question for Louisville gardeners: **"What can I safely plant direct-to-seed in the ground this week?"**
 
-It does this by pulling the past 7 days of actual soil and air temperatures and the next 7-day forecast from Open Meteo, comparing the lowest reading in that 14-day window against each plant's known germination minimums, and assigning one of three risk levels:
+It does this by pulling the past 7 days of actual soil and air temperatures and the next 7-day forecast from Open Meteo, comparing the lowest soil temperature reading in that 14-day window against each plant's known germination minimums, checking that air temperature stayed at or above the universal safe threshold of 40°F, and assigning one of three risk levels:
 
-- **Recommended (low)** — soil and air temperatures have stayed at or above the plant's optimal thresholds throughout the window. Safe to plant now.
-- **May Advise Waiting (medium)** — temperatures are above minimums but haven't reached optimal levels consistently. Germination is possible but not ideal.
-- **Not Recommended (high)** — at least one temperature reading fell below the plant's minimum requirement. Risk of failed germination or frost damage.
+- **Recommended (low)** — all soil temperature readings have remained at or above the plant's optimal germination threshold and air temperature has stayed at or above 40°F throughout the 14-day window. Safe to plant now.
+- **May Advise Waiting (medium)** — all soil temperature readings are above the plant's minimum requirement and air temperature has stayed at or above 40°F, but soil temperatures have not yet reached the optimal level. Germination is possible but not ideal.
+- **Not Recommended (high)** — at least one soil temperature reading fell below the plant's minimum germination requirement, or air temperature dropped below 40°F at any point in the 14-day window. Risk of failed germination or frost damage.
 
 ---
 
@@ -100,7 +100,7 @@ LouisvillePlantingApp/
 ├── .gitignore
 ├── LPAloadscript.py       # One-time DB initialization and plant seeding
 ├── LPAmain.py             # ETL pipeline (6 stages: extract → analytics)
-├── LPAdash.py             # Dash MVP dashboard (this file)
+├── LPAdash.py             # Dash MVP dashboard
 ├── requirements.txt
 └── README.md
 ```
