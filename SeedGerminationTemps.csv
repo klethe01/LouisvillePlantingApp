@@ -1,0 +1,52 @@
+Crop,Type,OFA Min (°F),OFA Optimum (°F),OFA Max (°F),Chart Min (°F),Chart Max (°F)
+Asparagus,vegetable/fruit,—,—,—,60,84
+Basil,herb,—,—,—,66,84
+Bean,vegetable/fruit,60,60–85,95,60,95
+Beet / Beetroot,vegetable/fruit,40,50–85,85,—,—
+Black Cherry,vegetable/fruit,—,—,—,70,80
+Blackberry,vegetable/fruit,—,—,—,66,74
+Cabbage,vegetable/fruit,40,45–95,85,—,—
+Carrot,vegetable/fruit,40,45–85,95,—,—
+Celery,vegetable/fruit,40,60–70,85,—,—
+Chard,vegetable/fruit,40,50–85,95,—,—
+Chives,herb,—,—,—,60,70
+Collard,vegetable/fruit,—,—,—,46,76
+Coriander/Cilantro,herb,—,—,—,56,70
+Cosmos,flower,—,—,—,70,74
+Cucumber,vegetable/fruit,60,60–95,105,60,105
+Dill,herb,—,—,—,60,70
+Eggplant,vegetable/fruit,60,75–90,95,60,74
+Gourds,vegetable/fruit,—,—,—,70,90
+Ground Cherry,vegetable/fruit,—,—,—,64,84
+Leek,vegetable/fruit,—,—,—,64,76
+Lettuce,vegetable/fruit,35,40–80,85,40,80
+Marigold,flower,—,—,—,70,74
+Melon,vegetable/fruit,60,70–95,100,60,86
+Mint,herb,—,—,—,68,74
+Mustard,herb,—,—,—,56,66
+Okra,vegetable/fruit,—,—,—,70,90
+Onion,vegetable/fruit,35,50–95,95,40,82
+Oregano,herb,—,—,—,72,76
+Parsley,herb,—,—,—,50,84
+Parsnip,vegetable/fruit,35,50–70,85,40,74
+Pea,vegetable/fruit,40,40–75,85,40,78
+Pepper,vegetable/fruit,60,65–95,95,60,95
+Pumpkin,vegetable/fruit,60,60-95,100,70,90
+Radish,vegetable/fruit,—,—,—,46,88
+Sage,herb,—,—,—,60,70
+Senna,herb,—,—,—,70,80
+Sorghum,vegetable/fruit,—,—,—,70,90
+Spinach,vegetable/fruit,35,45–75,85,—,—
+Squash ,vegetable/fruit,60,65–95,100,70,90
+Strawberry,vegetable/fruit,—,—,—,68,76
+Sumac (flameleaf),flower,—,—,—,50,76
+Sunflower,flower,—,—,—,70,84
+Sweet Corn,vegetable/fruit,50,60–95,105,50,105
+Thyme,herb,—,—,—,60,74
+Tomatillo,vegetable/fruit,—,—,—,60,95
+Tomato,vegetable/fruit,50,70–95,95,60,88
+Turnip,vegetable/fruit,40,60–100,105,40,95
+Zinnia,flower,—,—,—,70,84
+,,,,,,
+"Notes: deleting ones that require cold stratification for now for simplicity; for minimum temp discrepancies, going with higher of them if there is a 5 degree difference, or splitting difference if it is 10 degrees; removed cotton and tobacco",,,,,,
+Sources: Old Farmer's Almanac (almanac.com) & Mississippi Foundation for Renewable Energy (backwoodsenergy.org),,,,,,
